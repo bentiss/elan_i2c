@@ -4,7 +4,8 @@
  * Copyright (c) 2013 ELAN Microelectronics Corp.
  *
  * Author: 林政維 (Duson Lin) <dusonlin@emc.com.tw>
- * Version: 1.6.0
+ * Author: KT Liao <kt.liao@emc.com.tw>
+ * Version: 1.6.2
  *
  * Based on cyapa driver:
  * copyright (c) 2011-2012 Cypress Semiconductor, Inc.
@@ -40,7 +41,7 @@
 #include "elan_i2c.h"
 
 #define DRIVER_NAME		"elan_i2c"
-#define ELAN_DRIVER_VERSION	"1.6.1"
+#define ELAN_DRIVER_VERSION	"1.6.2"
 #define ELAN_VENDOR_ID		0x04f3
 #define ETP_MAX_PRESSURE	255
 #define ETP_FWIDTH_REDUCE	90
@@ -50,6 +51,7 @@
 #define ETP_MAX_FINGERS		5
 #define ETP_FINGER_DATA_LEN	5
 #define ETP_REPORT_ID		0x5D
+#define ETP_PT_REPORT_ID	0x5E
 #define ETP_REPORT_ID_OFFSET	2
 #define ETP_TOUCH_INFO_OFFSET	3
 #define ETP_FINGER_DATA_OFFSET	4
@@ -60,6 +62,7 @@
 struct elan_tp_data {
 	struct i2c_client	*client;
 	struct input_dev	*input;
+	struct input_dev	*tp_input; /* trackpoint input node */
 	struct regulator	*vcc;
 
 	const struct elan_transport_ops *ops;
@@ -199,15 +202,68 @@ static int elan_sleep(struct elan_tp_data *data)
 	return error;
 }
 
+static int elan_query_product(struct elan_tp_data *data)
+{
+	int error;
+
+	error = data->ops->get_product_id(data->client, &data->product_id);
+	if (error)
+		return error;
+
+	error = data->ops->get_sm_version(data->client, &data->ic_type,
+					  &data->sm_version);
+	if (error)
+		return error;
+
+	return 0;
+}
+
+static int elan_check_ASUS_special_fw(struct elan_tp_data *data)
+{
+	if (data->ic_type != 0x0E)
+		return false;
+
+	switch (data->product_id) {
+	case 0x05 ... 0x07:
+	case 0x09:
+	case 0x13:
+		return true;
+	default:
+		return false;
+	}
+}
+
 static int __elan_initialize(struct elan_tp_data *data)
 {
 	struct i2c_client *client = data->client;
+	bool woken_up = false;
 	int error;
 
 	error = data->ops->initialize(client);
 	if (error) {
 		dev_err(&client->dev, "device initialize failed: %d\n", error);
 		return error;
+	}
+
+	error = elan_query_product(data);
+	if (error)
+		return error;
+
+	/*
+	 * Some ASUS devices were shipped with firmware that requires
+	 * touchpads to be woken up first, before attempting to switch
+	 * them into absolute reporting mode.
+	 */
+	if (elan_check_ASUS_special_fw(data)) {
+		error = data->ops->sleep_control(client, false);
+		if (error) {
+			dev_err(&client->dev,
+				"failed to wake device up: %d\n", error);
+			return error;
+		}
+
+		msleep(200);
+		woken_up = true;
 	}
 
 	data->mode |= ETP_ENABLE_ABS;
@@ -218,11 +274,13 @@ static int __elan_initialize(struct elan_tp_data *data)
 		return error;
 	}
 
-	error = data->ops->sleep_control(client, false);
-	if (error) {
-		dev_err(&client->dev,
-			"failed to wake device up: %d\n", error);
-		return error;
+	if (!woken_up) {
+		error = data->ops->sleep_control(client, false);
+		if (error) {
+			dev_err(&client->dev,
+				"failed to wake device up: %d\n", error);
+			return error;
+		}
 	}
 
 	return 0;
@@ -248,21 +306,12 @@ static int elan_query_device_info(struct elan_tp_data *data)
 {
 	int error;
 
-	error = data->ops->get_product_id(data->client, &data->product_id);
-	if (error)
-		return error;
-
 	error = data->ops->get_version(data->client, false, &data->fw_version);
 	if (error)
 		return error;
 
 	error = data->ops->get_checksum(data->client, false,
 					&data->fw_checksum);
-	if (error)
-		return error;
-
-	error = data->ops->get_sm_version(data->client, &data->ic_type,
-					  &data->sm_version);
 	if (error)
 		return error;
 
@@ -865,6 +914,49 @@ static void elan_report_absolute(struct elan_tp_data *data, u8 *packet)
 	input_sync(input);
 }
 
+static void elan_report_trackpoint(struct elan_tp_data *data, u8 *report)
+{
+	struct input_dev *input = data->tp_input;
+	u8 *packet = &report[ETP_REPORT_ID_OFFSET + 1];
+	int x, y;
+	u32 t;
+
+	pr_err("%s trackpoint: %*ph %s:%d\n", __func__,
+		ETP_MAX_REPORT_LEN, packet,
+		__FILE__, __LINE__);
+
+	/* same incoming PS/2 packet than in the PS/2 driver */
+
+	t = get_unaligned_le32(&packet[0]);
+
+	switch (t & ~7U) {
+	case 0x06000030U:
+	case 0x16008020U:
+	case 0x26800010U:
+	case 0x36808000U:
+		x = packet[4] - (int)((packet[1]^0x80) << 1);
+		y = (int)((packet[2]^0x80) << 1) - packet[5];
+
+		input_report_key(input, BTN_LEFT, packet[0] & 0x01);
+		input_report_key(input, BTN_RIGHT, packet[0] & 0x02);
+		input_report_key(input, BTN_MIDDLE, packet[0] & 0x04);
+
+		input_report_rel(input, REL_X, x);
+		input_report_rel(input, REL_Y, y);
+
+		input_sync(input);
+
+		break;
+
+	default:
+		/* Dump unexpected packet sequences if debug=1 (default) */
+		dev_dbg(input->dev.parent,
+				"unexpected trackpoint sequence: %*ph\n",
+				ETP_MAX_REPORT_LEN, packet);
+		break;
+	}
+}
+
 static irqreturn_t elan_isr(int irq, void *dev_id)
 {
 	struct elan_tp_data *data = dev_id;
@@ -886,11 +978,17 @@ static irqreturn_t elan_isr(int irq, void *dev_id)
 	if (error)
 		goto out;
 
-	if (report[ETP_REPORT_ID_OFFSET] != ETP_REPORT_ID)
+	switch (report[ETP_REPORT_ID_OFFSET]) {
+	case ETP_REPORT_ID:
+		elan_report_absolute(data, report);
+		break;
+	case ETP_PT_REPORT_ID:
+		elan_report_trackpoint(data, report);
+		break;
+	default:
 		dev_err(dev, "invalid report id data (%x)\n",
 			report[ETP_REPORT_ID_OFFSET]);
-	else
-		elan_report_absolute(data, report);
+	}
 
 out:
 	return IRQ_HANDLED;
@@ -901,6 +999,37 @@ out:
  * Elan initialization functions
  ******************************************************************
  */
+
+static int elan_setup_trackpoint_input_device(struct elan_tp_data *data)
+{
+	struct device *dev = &data->client->dev;
+	struct input_dev *input;
+
+	input = devm_input_allocate_device(dev);
+	if (!input)
+		return -ENOMEM;
+
+	input->name = "Elan TrackPoint";
+	input->id.bustype = BUS_I2C;
+	input->id.vendor = ELAN_VENDOR_ID;
+	input->id.product = data->product_id;
+	input_set_drvdata(input, data);
+
+	input->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_REL);
+	input->relbit[BIT_WORD(REL_X)] =
+		BIT_MASK(REL_X) | BIT_MASK(REL_Y);
+	input->keybit[BIT_WORD(BTN_LEFT)] =
+		BIT_MASK(BTN_LEFT) | BIT_MASK(BTN_MIDDLE) |
+		BIT_MASK(BTN_RIGHT);
+
+	__set_bit(INPUT_PROP_POINTER, input->propbit);
+	__set_bit(INPUT_PROP_POINTING_STICK, input->propbit);
+
+	data->tp_input = input;
+
+	return 0;
+}
+
 static int elan_setup_input_device(struct elan_tp_data *data)
 {
 	struct device *dev = &data->client->dev;
@@ -1068,6 +1197,10 @@ static int elan_probe(struct i2c_client *client,
 	if (error)
 		return error;
 
+	error = elan_setup_trackpoint_input_device(data);
+	if (error)
+		return error;
+
 	/*
 	 * Systems using device tree should set up interrupt via DTS,
 	 * the rest will use the default falling edge interrupts.
@@ -1103,6 +1236,14 @@ static int elan_probe(struct i2c_client *client,
 	error = input_register_device(data->input);
 	if (error) {
 		dev_err(&client->dev, "failed to register input device: %d\n",
+			error);
+		return error;
+	}
+
+	error = input_register_device(data->tp_input);
+	if (error) {
+		dev_err(&client->dev,
+			"failed to register TrackPoint input device: %d\n",
 			error);
 		return error;
 	}
@@ -1186,6 +1327,7 @@ static const struct acpi_device_id elan_acpi_id[] = {
 	{ "ELAN0100", 0 },
 	{ "ELAN0600", 0 },
 	{ "ELAN1000", 0 },
+	{ "ETDFF00", 0 },
 	{ }
 };
 MODULE_DEVICE_TABLE(acpi, elan_acpi_id);
