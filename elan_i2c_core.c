@@ -934,11 +934,13 @@ static void elan_report_trackpoint(struct elan_tp_data *data, u8 *report)
 	input_report_key(input, BTN_RIGHT, packet[0] & 0x02);
 	input_report_key(input, BTN_MIDDLE, packet[0] & 0x04);
 
-	x = packet[4] - (int)((packet[1]^0x80) << 1);
-	y = (int)((packet[2]^0x80) << 1) - packet[5];
+	if ((packet[3] & 0x0F) == 0x06) {
+		x = packet[4] - (int)((packet[1]^0x80) << 1);
+		y = (int)((packet[2]^0x80) << 1) - packet[5];
 
-	input_report_rel(input, REL_X, x);
-	input_report_rel(input, REL_Y, y);
+		input_report_rel(input, REL_X, x);
+		input_report_rel(input, REL_Y, y);
+	}
 
 	input_sync(input);
 }
