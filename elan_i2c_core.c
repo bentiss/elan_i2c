@@ -959,6 +959,8 @@ static void elan_report_trackpoint(struct elan_tp_data *data, u8 *report)
 		dev_dbg(input->dev.parent,
 				"unexpected trackpoint sequence: %*ph\n",
 				ETP_MAX_REPORT_LEN, packet);
+		pr_err("unexpected trackpoint sequence: %*ph\n",
+			ETP_MAX_REPORT_LEN, packet);
 		break;
 	}
 }
