@@ -927,9 +927,9 @@ static void elan_report_trackpoint(struct elan_tp_data *data, u8 *report)
 	int x, y;
 	u32 t;
 
-	pr_err("%s trackpoint: %*ph %s:%d\n", __func__,
-		ETP_MAX_REPORT_LEN, packet,
-		__FILE__, __LINE__);
+//	pr_err("%s trackpoint: %*ph %s:%d\n", __func__,
+//		ETP_MAX_REPORT_LEN, packet,
+//		__FILE__, __LINE__);
 
 	/* same incoming PS/2 packet than in the PS/2 driver */
 
@@ -1014,7 +1014,7 @@ static void elan_smb_alert(struct i2c_client *client,
 		return;
 	}
 
-	pr_err("%s data: %d %s:%d\n", __func__, data, __FILE__, __LINE__);
+//	pr_err("%s data: %d %s:%d\n", __func__, data, __FILE__, __LINE__);
 
 	elan_isr(0, tp_data);
 }
