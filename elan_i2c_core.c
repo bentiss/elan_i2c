@@ -925,44 +925,22 @@ static void elan_report_trackpoint(struct elan_tp_data *data, u8 *report)
 	struct input_dev *input = data->tp_input;
 	u8 *packet = &report[ETP_REPORT_ID_OFFSET + 1];
 	int x, y;
-	u32 t;
 
 //	pr_err("%s trackpoint: %*ph %s:%d\n", __func__,
 //		ETP_MAX_REPORT_LEN, packet,
 //		__FILE__, __LINE__);
 
-	/* same incoming PS/2 packet than in the PS/2 driver */
+	input_report_key(input, BTN_LEFT, packet[0] & 0x01);
+	input_report_key(input, BTN_RIGHT, packet[0] & 0x02);
+	input_report_key(input, BTN_MIDDLE, packet[0] & 0x04);
 
-	t = get_unaligned_le32(&packet[0]);
+	x = packet[4] - (int)((packet[1]^0x80) << 1);
+	y = (int)((packet[2]^0x80) << 1) - packet[5];
 
-	switch (t & ~7U) {
-	case 0x06000030U:
-	case 0x16008020U:
-	case 0x26800010U:
-	case 0x36808000U:
-		x = packet[4] - (int)((packet[1]^0x80) << 1);
-		y = (int)((packet[2]^0x80) << 1) - packet[5];
+	input_report_rel(input, REL_X, x);
+	input_report_rel(input, REL_Y, y);
 
-		input_report_key(input, BTN_LEFT, packet[0] & 0x01);
-		input_report_key(input, BTN_RIGHT, packet[0] & 0x02);
-		input_report_key(input, BTN_MIDDLE, packet[0] & 0x04);
-
-		input_report_rel(input, REL_X, x);
-		input_report_rel(input, REL_Y, y);
-
-		input_sync(input);
-
-		break;
-
-	default:
-		/* Dump unexpected packet sequences if debug=1 (default) */
-		dev_dbg(input->dev.parent,
-				"unexpected trackpoint sequence: %*ph\n",
-				ETP_MAX_REPORT_LEN, packet);
-		pr_err("unexpected trackpoint sequence: %*ph\n",
-			ETP_MAX_REPORT_LEN, packet);
-		break;
-	}
+	input_sync(input);
 }
 
 static irqreturn_t elan_isr(int irq, void *dev_id)
