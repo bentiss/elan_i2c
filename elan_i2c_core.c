@@ -994,7 +994,8 @@ static void elan_smb_alert(struct i2c_client *client,
 		return;
 	}
 
-//	pr_err("%s data: %d %s:%d\n", __func__, data, __FILE__, __LINE__);
+	if (data)
+		pr_err("%s data: %d %s:%d\n", __func__, data, __FILE__, __LINE__);
 
 	elan_isr(0, tp_data);
 }
