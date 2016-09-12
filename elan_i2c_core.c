@@ -926,9 +926,10 @@ static void elan_report_trackpoint(struct elan_tp_data *data, u8 *report)
 	u8 *packet = &report[ETP_REPORT_ID_OFFSET + 1];
 	int x, y;
 
-//	pr_err("%s trackpoint: %*ph %s:%d\n", __func__,
-//		ETP_MAX_REPORT_LEN, packet,
-//		__FILE__, __LINE__);
+	if (packet[0] & 0x07)
+		pr_err("%s trackpoint: %*ph %s:%d\n", __func__,
+			ETP_MAX_REPORT_LEN, packet,
+			__FILE__, __LINE__);
 
 	input_report_key(input, BTN_LEFT, packet[0] & 0x01);
 	input_report_key(input, BTN_RIGHT, packet[0] & 0x02);
