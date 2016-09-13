@@ -926,10 +926,12 @@ static void elan_report_trackpoint(struct elan_tp_data *data, u8 *report)
 	u8 *packet = &report[ETP_REPORT_ID_OFFSET + 1];
 	int x, y;
 
-//	if (packet[0] & 0x07)
-//		pr_err("%s trackpoint: %*ph %s:%d\n", __func__,
-//			ETP_MAX_REPORT_LEN, packet,
-//			__FILE__, __LINE__);
+	if (!data->tp_input) {
+		dev_warn_once(&data->client->dev,
+			      "received a trackpoint report while no trackpoint device has been created.\n"
+			      "Please report upstream.\n");
+		return;
+	}
 
 	input_report_key(input, BTN_LEFT, packet[0] & 0x01);
 	input_report_key(input, BTN_RIGHT, packet[0] & 0x02);
@@ -996,9 +998,6 @@ static void elan_smb_alert(struct i2c_client *client,
 			"Something went wrong, driver data is NULL.\n");
 		return;
 	}
-
-	if (data)
-		pr_err("%s data: %d %s:%d\n", __func__, data, __FILE__, __LINE__);
 
 	elan_isr(0, tp_data);
 }
@@ -1116,6 +1115,7 @@ static int elan_probe(struct i2c_client *client,
 	struct device *dev = &client->dev;
 	struct elan_tp_data *data;
 	unsigned long irqflags;
+	bool has_trackpoint = false;
 	int error;
 
 	if (IS_ENABLED(CONFIG_MOUSE_ELAN_I2C_I2C) &&
@@ -1128,11 +1128,14 @@ static int elan_probe(struct i2c_client *client,
 						I2C_FUNC_SMBUS_I2C_BLOCK)) {
 		transport_ops = &elan_smbus_ops;
 
-		if (!client->irq &&
-		    !i2c_check_functionality(client->adapter,
-					     I2C_FUNC_SMBUS_HOST_NOTIFY)) {
-			dev_err(dev, "no irq given and no Host Notify support\n");
-			return -ENODEV;
+		if (!client->irq) {
+			has_trackpoint = true;
+
+			if (!i2c_check_functionality(client->adapter,
+					I2C_FUNC_SMBUS_HOST_NOTIFY)) {
+				dev_err(dev, "no Host Notify support\n");
+				return -ENODEV;
+			}
 		}
 	} else {
 		dev_err(dev, "not a supported I2C/SMBus adapter\n");
@@ -1213,9 +1216,11 @@ static int elan_probe(struct i2c_client *client,
 	if (error)
 		return error;
 
-	error = elan_setup_trackpoint_input_device(data);
-	if (error)
-		return error;
+	if (has_trackpoint) {
+		error = elan_setup_trackpoint_input_device(data);
+		if (error)
+			return error;
+	}
 
 	if (client->irq) {
 		/*
@@ -1259,12 +1264,14 @@ static int elan_probe(struct i2c_client *client,
 		return error;
 	}
 
-	error = input_register_device(data->tp_input);
-	if (error) {
-		dev_err(&client->dev,
-			"failed to register TrackPoint input device: %d\n",
-			error);
-		return error;
+	if (data->tp_input) {
+		error = input_register_device(data->tp_input);
+		if (error) {
+			dev_err(&client->dev,
+				"failed to register TrackPoint input device: %d\n",
+				error);
+			return error;
+		}
 	}
 
 	/*
@@ -1350,7 +1357,6 @@ static const struct acpi_device_id elan_acpi_id[] = {
 	{ "ELAN0100", 0 },
 	{ "ELAN0600", 0 },
 	{ "ELAN1000", 0 },
-	{ "ETDFF00", 0 },
 	{ }
 };
 MODULE_DEVICE_TABLE(acpi, elan_acpi_id);
