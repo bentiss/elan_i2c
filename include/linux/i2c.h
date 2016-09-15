@@ -33,6 +33,7 @@
 #include <linux/of.h>		/* for struct device_node */
 #include <linux/swab.h>		/* for swab16 */
 #include <uapi/linux/i2c.h>
+#include <linux/version.h>
 
 extern struct bus_type i2c_bus_type;
 extern struct device_type i2c_adapter_type;
@@ -532,7 +533,9 @@ struct i2c_adapter {
 
 	/* data fields that are valid for all devices	*/
 	struct rt_mutex bus_lock;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 7, 0)
 	struct rt_mutex mux_lock;
+#endif
 
 	int timeout;			/* in jiffies */
 	int retries;
@@ -548,9 +551,11 @@ struct i2c_adapter {
 	struct i2c_bus_recovery_info *bus_recovery_info;
 	const struct i2c_adapter_quirks *quirks;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 7, 0)
 	void (*lock_bus)(struct i2c_adapter *, unsigned int flags);
 	int (*trylock_bus)(struct i2c_adapter *, unsigned int flags);
 	void (*unlock_bus)(struct i2c_adapter *, unsigned int flags);
+#endif
 };
 #define to_i2c_adapter(d) container_of(d, struct i2c_adapter, dev)
 
@@ -580,6 +585,7 @@ i2c_parent_is_i2c_adapter(const struct i2c_adapter *adapter)
 int i2c_for_each_dev(void *data, int (*fn)(struct device *, void *));
 
 /* Adapter locking functions, exported for shared pin cases */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 7, 0)
 #define I2C_LOCK_ROOT_ADAPTER BIT(0)
 #define I2C_LOCK_SEGMENT      BIT(1)
 
@@ -618,6 +624,10 @@ i2c_unlock_adapter(struct i2c_adapter *adapter)
 {
 	i2c_unlock_bus(adapter, I2C_LOCK_ROOT_ADAPTER);
 }
+#else
+void i2c_lock_adapter(struct i2c_adapter *);
+void i2c_unlock_adapter(struct i2c_adapter *);
+#endif
 
 /*flags for the client struct: */
 #define I2C_CLIENT_PEC		0x04	/* Use Packet Error Checking */
