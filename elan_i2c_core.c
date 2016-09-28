@@ -98,6 +98,34 @@ struct elan_tp_data {
 	bool			baseline_ready;
 };
 
+static inline void elan_enable_irq(struct elan_tp_data *tp)
+{
+	if (tp->client->irq)
+		enable_irq(tp->client->irq);
+}
+
+static inline void elan_disable_irq(struct elan_tp_data *tp)
+{
+	if (tp->client->irq)
+		disable_irq(tp->client->irq);
+}
+
+static inline int elan_enable_irq_wake(struct elan_tp_data *tp)
+{
+	if (tp->client->irq)
+		return enable_irq_wake(tp->client->irq);
+
+	return 0;
+}
+
+static inline int elan_disable_irq_wake(struct elan_tp_data *tp)
+{
+	if (tp->client->irq)
+		return disable_irq_wake(tp->client->irq);
+
+	return 0;
+}
+
 static int elan_get_fwinfo(u8 iap_version, u16 *validpage_count,
 			   u16 *signature_address)
 {
@@ -459,8 +487,7 @@ static int elan_update_firmware(struct elan_tp_data *data,
 
 	dev_dbg(&client->dev, "Starting firmware update....\n");
 
-	if (client->irq)
-		disable_irq(client->irq);
+	elan_disable_irq(data);
 	data->in_fw_update = true;
 
 	retval = __elan_update_firmware(data, fw);
@@ -474,8 +501,7 @@ static int elan_update_firmware(struct elan_tp_data *data,
 	}
 
 	data->in_fw_update = false;
-	if (client->irq)
-		enable_irq(client->irq);
+	elan_enable_irq(data);
 
 	return retval;
 }
@@ -603,8 +629,7 @@ static ssize_t calibrate_store(struct device *dev,
 	if (retval)
 		return retval;
 
-	if (client->irq)
-		disable_irq(client->irq);
+	elan_disable_irq(data);
 
 	data->mode |= ETP_ENABLE_CALIBRATE;
 	retval = data->ops->set_mode(client, data->mode);
@@ -650,8 +675,7 @@ out_disable_calibrate:
 			retval = error;
 	}
 out:
-	if (client->irq)
-		enable_irq(client->irq);
+	elan_enable_irq(data);
 	mutex_unlock(&data->sysfs_mutex);
 	return retval ?: count;
 }
@@ -717,8 +741,7 @@ static ssize_t acquire_store(struct device *dev, struct device_attribute *attr,
 	if (retval)
 		return retval;
 
-	if (client->irq)
-		disable_irq(client->irq);
+	elan_disable_irq(data);
 
 	data->baseline_ready = false;
 
@@ -760,8 +783,7 @@ out_disable_calibrate:
 			retval = error;
 	}
 out:
-	if (client->irq)
-		enable_irq(client->irq);
+	elan_enable_irq(data);
 	mutex_unlock(&data->sysfs_mutex);
 	return retval ?: count;
 }
@@ -1111,11 +1133,12 @@ static void elan_remove_sysfs_groups(void *_data)
 static int elan_probe(struct i2c_client *client,
 		      const struct i2c_device_id *dev_id)
 {
+	struct elan_platform_data *pdata = dev_get_platdata(&client->dev);
 	const struct elan_transport_ops *transport_ops;
 	struct device *dev = &client->dev;
 	struct elan_tp_data *data;
 	unsigned long irqflags;
-	bool has_trackpoint = false;
+	bool has_trackpoint = pdata && pdata->trackpoint;
 	int error;
 
 	if (IS_ENABLED(CONFIG_MOUSE_ELAN_I2C_I2C) &&
@@ -1299,14 +1322,12 @@ static int __maybe_unused elan_suspend(struct device *dev)
 	if (ret)
 		return ret;
 
-	if (client->irq)
-		disable_irq(client->irq);
+	elan_disable_irq(data);
 
 	if (device_may_wakeup(dev)) {
 		ret = elan_sleep(data);
 		/* Enable wake from IRQ */
-		if (client->irq)
-			data->irq_wake = (enable_irq_wake(client->irq) == 0);
+		data->irq_wake = (elan_enable_irq_wake(data) == 0);
 	} else {
 		ret = elan_disable_power(data);
 	}
@@ -1322,8 +1343,7 @@ static int __maybe_unused elan_resume(struct device *dev)
 	int error;
 
 	if (device_may_wakeup(dev) && data->irq_wake) {
-		if (client->irq)
-			disable_irq_wake(client->irq);
+		elan_disable_irq_wake(data);
 		data->irq_wake = false;
 	}
 
@@ -1338,8 +1358,7 @@ static int __maybe_unused elan_resume(struct device *dev)
 		dev_err(dev, "initialize when resuming failed: %d\n", error);
 
 err:
-	if (data->client->irq)
-		enable_irq(data->client->irq);
+	elan_enable_irq(data);
 	return error;
 }
 
