@@ -117,7 +117,6 @@
 #define SMBSLVSTS(p)	(16 + (p)->smba)	/* ICH3 and later */
 #define SMBSLVCMD(p)	(17 + (p)->smba)	/* ICH3 and later */
 #define SMBNTFDADD(p)	(20 + (p)->smba)	/* ICH3 and later */
-#define SMBNTFDDAT(p)   (22 + (p)->smba)	/* ICH3 and later */
 
 /* PCI Address Constants */
 #define SMBBAR		4
@@ -267,7 +266,6 @@ struct i801_priv {
 	 */
 	bool acpi_reserved;
 	struct mutex acpi_lock;
-	struct smbus_host_notify *host_notify;
 };
 
 #define FEATURE_SMBUS_PEC	BIT(0)
@@ -578,27 +576,16 @@ static void i801_isr_byte_done(struct i801_priv *priv)
 static irqreturn_t i801_host_notify_isr(struct i801_priv *priv)
 {
 	unsigned short addr;
-	unsigned int data;
-	int ret;
-
-	if (unlikely(!priv->host_notify))
-		goto out;
 
 	addr = inb_p(SMBNTFDADD(priv)) >> 1;
-	data = inw_p(SMBNTFDDAT(priv));
 
 	/*
 	 * With the tested platforms, reading SMBNTFDDAT (22 + (p)->smba)
-	 * always returns 0 and is safe to read.
-	 * We just use 0 given we have no use of the data right now.
+	 * always returns 0. Our current implementation doesn't provide
+	 * data, so we just ignore it.
 	 */
-	ret = i2c_handle_smbus_host_notify(priv->host_notify, addr, data);
-	if (ret < 0)
-		dev_warn(&priv->pci_dev->dev,
-			 "Host Notify handling failed: %d\n", ret);
+	i2c_handle_smbus_host_notify(&priv->adapter, addr);
 
-
-out:
 	/* clear Host Notify bit and return */
 	outb_p(SMBSLVSTS_HST_NTFY_STS, SMBSLVSTS(priv));
 	return IRQ_HANDLED;
@@ -953,18 +940,12 @@ static u32 i801_func(struct i2c_adapter *adapter)
 		I2C_FUNC_SMBUS_HOST_NOTIFY : 0);
 }
 
-static int i801_enable_host_notify(struct i2c_adapter *adapter)
+static void i801_enable_host_notify(struct i2c_adapter *adapter)
 {
 	struct i801_priv *priv = i2c_get_adapdata(adapter);
 
 	if (!(priv->features & FEATURE_HOST_NOTIFY))
-		return 0; /* not an error actually */
-
-	if (!priv->host_notify) {
-		priv->host_notify = i2c_setup_smbus_host_notify(adapter);
-		if (!priv->host_notify)
-			return -ENOMEM;
-	}
+		return;
 
 	priv->original_slvcmd = inb_p(SMBSLVCMD(priv));
 
@@ -974,8 +955,6 @@ static int i801_enable_host_notify(struct i2c_adapter *adapter)
 
 	/* clear Host Notify bit to allow a new notification */
 	outb_p(SMBSLVSTS_HST_NTFY_STS, SMBSLVSTS(priv));
-
-	return 0;
 }
 
 static void i801_disable_host_notify(struct i801_priv *priv)
@@ -983,10 +962,7 @@ static void i801_disable_host_notify(struct i801_priv *priv)
 	if (!(priv->features & FEATURE_HOST_NOTIFY))
 		return;
 
-	/* disable Host Notify... */
 	outb_p(priv->original_slvcmd, SMBSLVCMD(priv));
-	/* ...and process the already queued notifications */
-	i2c_cancel_smbus_host_notify(priv->host_notify);
 }
 
 static const struct i2c_algorithm smbus_algorithm = {
@@ -1647,14 +1623,7 @@ static int i801_probe(struct pci_dev *dev, const struct pci_device_id *id)
 		return err;
 	}
 
-	/*
-	 * Enable Host Notify for chips that supports it.
-	 * It is done after i2c_add_adapter() so that we are sure the work queue
-	 * is not used if i2c_add_adapter() fails.
-	 */
-	err = i801_enable_host_notify(&priv->adapter);
-	if (err)
-		dev_warn(&dev->dev, "Unable to enable SMBus Host Notify\n");
+	i801_enable_host_notify(&priv->adapter);
 
 	i801_probe_optional_slaves(priv);
 	/* We ignore errors - multiplexing is optional */
@@ -1705,11 +1674,8 @@ static int i801_resume(struct device *dev)
 {
 	struct pci_dev *pci_dev = to_pci_dev(dev);
 	struct i801_priv *priv = pci_get_drvdata(pci_dev);
-	int err;
 
-	err = i801_enable_host_notify(&priv->adapter);
-	if (err)
-		dev_warn(dev, "Unable to enable SMBus Host Notify\n");
+	i801_enable_host_notify(&priv->adapter);
 
 	return 0;
 }
