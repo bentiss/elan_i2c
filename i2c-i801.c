@@ -98,6 +98,9 @@
 #include <linux/platform_data/itco_wdt.h>
 #include <linux/pm_runtime.h>
 
+#include <linux/irq.h>
+#include <linux/irqdomain.h>
+
 #if IS_ENABLED(CONFIG_I2C_MUX_GPIO) && defined CONFIG_DMI
 #include <linux/gpio.h>
 #include <linux/i2c-mux-gpio.h>
@@ -266,6 +269,8 @@ struct i801_priv {
 	 */
 	bool acpi_reserved;
 	struct mutex acpi_lock;
+
+	struct irq_domain *host_notify_domain;
 };
 
 #define FEATURE_SMBUS_PEC	BIT(0)
@@ -295,6 +300,33 @@ MODULE_PARM_DESC(disable_features, "Disable selected driver features:\n"
 	"\t\t  0x08  disable the I2C block read functionality\n"
 	"\t\t  0x10  don't use interrupts\n"
 	"\t\t  0x20  disable SMBus Host Notify ");
+
+/**
+ * i2c_handle_smbus_host_notify - Forward a Host Notify event to the correct
+ * I2C client.
+ * @adap: the adapter
+ * @addr: the I2C address of the notifying device
+ * Context: can't sleep
+ *
+ * Helper function to be called from an I2C bus driver's interrupt
+ * handler. It will schedule the Host Notify IRQ.
+ */
+static int i801_handle_smbus_host_notify(struct i2c_adapter *adap, unsigned short addr)
+{
+	struct i801_priv *priv = i2c_get_adapdata(adap);
+	int irq;
+
+	if (!adap)
+		return -EINVAL;
+
+	irq = irq_find_mapping(priv->host_notify_domain, addr);
+	if (irq <= 0)
+		return -ENXIO;
+
+	generic_handle_irq(irq);
+
+	return 0;
+}
 
 /* Make sure the SMBus host is ready to start transmitting.
    Return 0 if it is, -EBUSY if it is not. */
@@ -584,7 +616,7 @@ static irqreturn_t i801_host_notify_isr(struct i801_priv *priv)
 	 * always returns 0. Our current implementation doesn't provide
 	 * data, so we just ignore it.
 	 */
-	i2c_handle_smbus_host_notify(&priv->adapter, addr);
+	i801_handle_smbus_host_notify(&priv->adapter, addr);
 
 	/* clear Host Notify bit and return */
 	outb_p(SMBSLVSTS_HST_NTFY_STS, SMBSLVSTS(priv));
@@ -1462,6 +1494,88 @@ static inline int i801_acpi_probe(struct i801_priv *priv) { return 0; }
 static inline void i801_acpi_remove(struct i801_priv *priv) { }
 #endif
 
+#define I2C_ADDR_7BITS_MAX	0x77
+#define I2C_ADDR_7BITS_COUNT	I2C_ADDR_7BITS_MAX + 1
+
+static void i801_host_notify_irq_teardown(struct i801_priv *priv)
+{
+	struct irq_domain *domain = priv->host_notify_domain;
+	irq_hw_number_t hwirq;
+
+	if (!domain)
+		return;
+
+	for (hwirq = 0 ; hwirq < I2C_ADDR_7BITS_COUNT ; hwirq++)
+		irq_dispose_mapping(irq_find_mapping(domain, hwirq));
+
+	irq_domain_remove(domain);
+	priv->host_notify_domain = NULL;
+}
+
+static int i801_host_notify_irq_map(struct irq_domain *h,
+				    unsigned int virq,
+				    irq_hw_number_t hw_irq_num)
+{
+	irq_set_chip_and_handler(virq, &dummy_irq_chip, handle_simple_irq);
+
+	return 0;
+}
+
+static struct irq_domain_ops i801_host_notify_irq_ops = {
+	.map = i801_host_notify_irq_map,
+};
+
+static int i801_setup_host_notify_irq_domain(struct i801_priv *priv)
+{
+	struct i2c_adapter *adap = &priv->adapter;
+	struct irq_domain *domain;
+
+	if (!(priv->features & FEATURE_HOST_NOTIFY))
+		return 0;
+
+	domain = irq_domain_create_linear(adap->dev.fwnode,
+					  I2C_ADDR_7BITS_COUNT,
+					  &i801_host_notify_irq_ops, adap);
+	if (!domain)
+		return -ENOMEM;
+
+	priv->host_notify_domain = domain;
+
+	return 0;
+}
+
+/**
+ * i2c_smbus_host_notify_to_irq - Gets a Host Notify IRQ number associated to
+ * the I2C client.
+ * @client: the I2C client
+ *
+ * Will return a valid IRQ number or an error. The Host Notify interrupts
+ * only work currently with 7 bits addresses.
+ */
+int i801_smbus_host_notify_to_irq(const struct i2c_client *client)
+{
+	struct i2c_adapter *adap = client->adapter;
+	struct i801_priv *priv = i2c_get_adapdata(adap);
+	unsigned int irq;
+
+	if (!priv->host_notify_domain)
+		return -ENXIO;
+
+	if (client->flags & I2C_CLIENT_TEN) {
+		dev_err(&client->dev,
+			"Host Notify not supported on 10 bits addresses.\n");
+		return -EINVAL;
+	}
+
+	irq = irq_find_mapping(priv->host_notify_domain, client->addr);
+	if (!irq)
+		irq = irq_create_mapping(priv->host_notify_domain,
+					 client->addr);
+
+	return irq > 0 ? irq : -ENXIO;
+}
+EXPORT_SYMBOL_GPL(i801_smbus_host_notify_to_irq);
+
 static int i801_probe(struct pci_dev *dev, const struct pci_device_id *id)
 {
 	unsigned char temp;
@@ -1617,6 +1731,15 @@ static int i801_probe(struct pci_dev *dev, const struct pci_device_id *id)
 
 	snprintf(priv->adapter.name, sizeof(priv->adapter.name),
 		"SMBus I801 adapter at %04lx", priv->smba);
+
+	/* register soft irqs for Host Notify */
+	err = i801_setup_host_notify_irq_domain(priv);
+	if (err) {
+		pr_err("adapter '%s': can't create Host Notify IRQs (%d)\n",
+		       priv->adapter.name, err);
+		return err;
+	}
+
 	err = i2c_add_adapter(&priv->adapter);
 	if (err) {
 		i801_acpi_remove(priv);
@@ -1651,6 +1774,8 @@ static void i801_remove(struct pci_dev *dev)
 	i2c_del_adapter(&priv->adapter);
 	i801_acpi_remove(priv);
 	pci_write_config_byte(dev, SMBHSTCFG, priv->original_hstcfg);
+
+	i801_host_notify_irq_teardown(priv);
 
 	platform_device_unregister(priv->tco_pdev);
 
